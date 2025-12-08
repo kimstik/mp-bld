@@ -233,7 +233,7 @@ jobs:
 
     strategy:
       matrix:
-        board: [RPI_PICO, RPI_PICO_W, RPI_PICO2]
+        board: [RPI_PICO]
 
     steps:
       - name: Checkout MicroPython
@@ -450,8 +450,6 @@ jobs:
 
             ### RP2 (Raspberry Pi Pico)
             - `*-rp2-RPI_PICO.uf2` - Pico (RP2040)
-            - `*-rp2-RPI_PICO_W.uf2` - Pico W (WiFi)
-            - `*-rp2-RPI_PICO2.uf2` - Pico 2 (RP2350)
             - `*-reference.uf2` - unmodified reference build
             - `*.elf` - debug symbols (if enabled)
 

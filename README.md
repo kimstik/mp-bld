@@ -17,7 +17,7 @@ Automated GitHub Actions workflow for building MicroPython firmware.
 | Target | Boards/Variants | Output |
 |--------|-----------------|--------|
 | Windows | i686, x86_64 | `.exe` |
-| RP2 | RPI_PICO, RPI_PICO_W, RPI_PICO2 | `.uf2` |
+| RP2 | RPI_PICO (RP2040) | `.uf2` |
 | ESP8266 | 2M, FLASH_1M, FLASH_512K | `.bin` |
 
 ## Usage
