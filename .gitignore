@@ -1,0 +1,21 @@
+# Build artifacts
+*.exe
+*.bin
+*.uf2
+*.elf
+*.map
+
+# Toolchains
+xtensa-lx106-elf/
+gcc-arm-none-eabi/
+
+# MicroPython source (cloned during build)
+micropython/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

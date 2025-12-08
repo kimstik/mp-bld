@@ -1,0 +1,462 @@
+name: Build MicroPython
+
+on:
+  workflow_call:
+    inputs:
+      mp_version:
+        description: 'MicroPython version tag'
+        required: true
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      mp_version:
+        description: 'MicroPython version (e.g. v1.26.1, or "latest")'
+        required: true
+        default: 'latest'
+      targets:
+        description: 'Targets to build (comma-separated)'
+        required: true
+        default: 'windows,rp2,esp8266'
+      rp2_flash_mb:
+        description: 'RP2 flash size in MB (2=default, 4=W25Q32, 8, 16)'
+        required: false
+        default: '4'
+      esp8266_flash:
+        description: 'ESP8266 flash variants (comma-separated: 512K,1M,2M,4M,8M,16M)'
+        required: false
+        default: '8M,16M'
+      cflags_extra:
+        description: 'Extra CFLAGS (e.g. -DMICROPY_PY_THREAD=0)'
+        required: false
+        default: ''
+      upload_release:
+        description: 'Create GitHub release'
+        type: boolean
+        default: true
+      include_debug:
+        description: 'Include debug artifacts (unstripped ELF)'
+        type: boolean
+        default: false
+      build_reference:
+        description: 'Also build unmodified reference firmware'
+        type: boolean
+        default: true
+
+env:
+  MP_REPO: micropython/micropython
+
+jobs:
+  # ===========================================
+  # Resolve version and prepare
+  # ===========================================
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.tag }}
+      build_windows: ${{ steps.targets.outputs.windows }}
+      build_rp2: ${{ steps.targets.outputs.rp2 }}
+      build_esp8266: ${{ steps.targets.outputs.esp8266 }}
+      rp2_flash_bytes: ${{ steps.flash.outputs.rp2_bytes }}
+      esp8266_variants: ${{ steps.flash.outputs.esp8266_variants }}
+      cflags_extra: ${{ steps.flags.outputs.cflags }}
+      include_debug: ${{ steps.flags.outputs.debug }}
+      build_reference: ${{ steps.flags.outputs.reference }}
+
+    steps:
+      - name: Resolve MicroPython version
+        id: version
+        run: |
+          VERSION="${{ inputs.mp_version }}"
+          if [ "$VERSION" = "latest" ] || [ -z "$VERSION" ]; then
+            VERSION=$(curl -s https://api.github.com/repos/${{ env.MP_REPO }}/releases/latest | jq -r .tag_name)
+          fi
+          echo "Building MicroPython $VERSION"
+          echo "tag=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Parse targets
+        id: targets
+        run: |
+          TARGETS="${{ inputs.targets }}"
+          if [ -z "$TARGETS" ]; then
+            TARGETS="windows,rp2,esp8266"
+          fi
+          echo "windows=$([[ $TARGETS == *windows* ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "rp2=$([[ $TARGETS == *rp2* ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "esp8266=$([[ $TARGETS == *esp8266* ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Parse flash sizes
+        id: flash
+        run: |
+          # RP2 flash in bytes
+          RP2_MB="${{ inputs.rp2_flash_mb }}"
+          if [ -z "$RP2_MB" ]; then
+            RP2_MB="4"
+          fi
+          RP2_BYTES=$((RP2_MB * 1024 * 1024))
+          echo "rp2_bytes=$RP2_BYTES" >> $GITHUB_OUTPUT
+
+          # ESP8266 variants as JSON array
+          ESP_VARIANTS="${{ inputs.esp8266_flash }}"
+          if [ -z "$ESP_VARIANTS" ]; then
+            ESP_VARIANTS="8M,16M"
+          fi
+          # Convert to JSON array: "8M,16M" -> ["8M","16M"]
+          JSON=$(echo "$ESP_VARIANTS" | tr ',' '\n' | jq -R . | jq -s -c .)
+          echo "esp8266_variants=$JSON" >> $GITHUB_OUTPUT
+
+      - name: Parse flags
+        id: flags
+        run: |
+          CFLAGS="${{ inputs.cflags_extra }}"
+          echo "cflags=$CFLAGS" >> $GITHUB_OUTPUT
+
+          DEBUG="${{ inputs.include_debug }}"
+          if [ -z "$DEBUG" ]; then
+            DEBUG="false"
+          fi
+          echo "debug=$DEBUG" >> $GITHUB_OUTPUT
+
+          REF="${{ inputs.build_reference }}"
+          if [ -z "$REF" ]; then
+            REF="true"
+          fi
+          echo "reference=$REF" >> $GITHUB_OUTPUT
+
+  # ===========================================
+  # Build mpy-cross (shared across targets)
+  # ===========================================
+  mpy-cross:
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout MicroPython
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MP_REPO }}
+          ref: ${{ needs.prepare.outputs.version }}
+          path: micropython
+
+      - name: Cache mpy-cross
+        id: cache-mpy-cross
+        uses: actions/cache@v4
+        with:
+          path: micropython/mpy-cross/build/mpy-cross
+          key: mpy-cross-${{ needs.prepare.outputs.version }}
+
+      - name: Build mpy-cross
+        if: steps.cache-mpy-cross.outputs.cache-hit != 'true'
+        run: make -C micropython/mpy-cross -j$(nproc)
+
+      - name: Upload mpy-cross artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpy-cross
+          path: micropython/mpy-cross/build/mpy-cross
+          retention-days: 1
+
+  # ===========================================
+  # Windows build
+  # ===========================================
+  build-windows:
+    needs: [prepare, mpy-cross]
+    if: needs.prepare.outputs.build_windows == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - arch: i686
+            label: 32bit
+          - arch: x86_64
+            label: 64bit
+
+    steps:
+      - name: Checkout MicroPython
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MP_REPO }}
+          ref: ${{ needs.prepare.outputs.version }}
+          path: micropython
+
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64
+
+      - name: Download mpy-cross
+        uses: actions/download-artifact@v4
+        with:
+          name: mpy-cross
+          path: micropython/mpy-cross/build/
+
+      - name: Make mpy-cross executable
+        run: chmod +x micropython/mpy-cross/build/mpy-cross
+
+      - name: Build submodules
+        run: make -C micropython/ports/windows submodules
+
+      # Reference build (unmodified)
+      - name: Build reference firmware
+        if: needs.prepare.outputs.build_reference == 'true'
+        run: |
+          make -C micropython/ports/windows -j$(nproc) \
+            CROSS_COMPILE=${{ matrix.arch }}-w64-mingw32- \
+            BUILD=build-reference
+          cp micropython/ports/windows/build-reference/micropython.exe \
+             micropython-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-reference.exe
+
+      # Custom build
+      - name: Build custom firmware
+        run: |
+          CFLAGS_EXTRA="${{ needs.prepare.outputs.cflags_extra }}"
+          make -C micropython/ports/windows -j$(nproc) \
+            CROSS_COMPILE=${{ matrix.arch }}-w64-mingw32- \
+            ${CFLAGS_EXTRA:+CFLAGS_EXTRA="$CFLAGS_EXTRA"} \
+            BUILD=build-custom
+          cp micropython/ports/windows/build-custom/micropython.exe \
+             micropython-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}.exe
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: micropython-*.exe
+          retention-days: 30
+
+  # ===========================================
+  # RP2 build (Raspberry Pi Pico)
+  # ===========================================
+  build-rp2:
+    needs: [prepare, mpy-cross]
+    if: needs.prepare.outputs.build_rp2 == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        board: [RPI_PICO, RPI_PICO_W, RPI_PICO2]
+
+    steps:
+      - name: Checkout MicroPython
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MP_REPO }}
+          ref: ${{ needs.prepare.outputs.version }}
+          path: micropython
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake
+
+      - name: Download mpy-cross
+        uses: actions/download-artifact@v4
+        with:
+          name: mpy-cross
+          path: micropython/mpy-cross/build/
+
+      - name: Make mpy-cross executable
+        run: chmod +x micropython/mpy-cross/build/mpy-cross
+
+      - name: Build submodules
+        run: make -C micropython/ports/rp2 BOARD=${{ matrix.board }} submodules
+
+      # Reference build (unmodified)
+      - name: Build reference firmware
+        if: needs.prepare.outputs.build_reference == 'true'
+        run: |
+          make -C micropython/ports/rp2 -j$(nproc) \
+            BOARD=${{ matrix.board }} \
+            BUILD=build-${{ matrix.board }}-reference
+          cp micropython/ports/rp2/build-${{ matrix.board }}-reference/firmware.uf2 \
+             micropython-${{ needs.prepare.outputs.version }}-rp2-${{ matrix.board }}-reference.uf2
+
+      # Custom build with flash size
+      - name: Build custom firmware
+        run: |
+          FLASH_BYTES="${{ needs.prepare.outputs.rp2_flash_bytes }}"
+          CFLAGS_EXTRA="${{ needs.prepare.outputs.cflags_extra }}"
+          make -C micropython/ports/rp2 -j$(nproc) \
+            BOARD=${{ matrix.board }} \
+            BUILD=build-${{ matrix.board }}-custom \
+            ${FLASH_BYTES:+PICO_FLASH_SIZE_BYTES=$FLASH_BYTES} \
+            ${CFLAGS_EXTRA:+CFLAGS_EXTRA="$CFLAGS_EXTRA"}
+          cp micropython/ports/rp2/build-${{ matrix.board }}-custom/firmware.uf2 \
+             micropython-${{ needs.prepare.outputs.version }}-rp2-${{ matrix.board }}.uf2
+
+      # Debug artifacts (unstripped ELF)
+      - name: Collect debug artifacts
+        if: needs.prepare.outputs.include_debug == 'true'
+        run: |
+          cp micropython/ports/rp2/build-${{ matrix.board }}-custom/firmware.elf \
+             micropython-${{ needs.prepare.outputs.version }}-rp2-${{ matrix.board }}.elf
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rp2-${{ matrix.board }}
+          path: micropython-*
+          retention-days: 30
+
+  # ===========================================
+  # ESP8266 build
+  # ===========================================
+  build-esp8266:
+    needs: [prepare, mpy-cross]
+    if: needs.prepare.outputs.build_esp8266 == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        variant: ${{ fromJson(needs.prepare.outputs.esp8266_variants) }}
+
+    steps:
+      - name: Checkout MicroPython
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MP_REPO }}
+          ref: ${{ needs.prepare.outputs.version }}
+          path: micropython
+
+      - name: Cache Xtensa toolchain
+        id: cache-xtensa
+        uses: actions/cache@v4
+        with:
+          path: ~/xtensa-lx106-elf
+          key: xtensa-lx106-elf-standalone
+
+      - name: Install Xtensa toolchain
+        if: steps.cache-xtensa.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://micropython.org/resources/xtensa-lx106-elf-standalone.tar.gz
+          tar -xzf xtensa-lx106-elf-standalone.tar.gz -C ~/
+          rm xtensa-lx106-elf-standalone.tar.gz
+
+      - name: Install dependencies
+        run: sudo pip3 install pyserial esptool==3.3.1
+
+      - name: Download mpy-cross
+        uses: actions/download-artifact@v4
+        with:
+          name: mpy-cross
+          path: micropython/mpy-cross/build/
+
+      - name: Make mpy-cross executable
+        run: chmod +x micropython/mpy-cross/build/mpy-cross
+
+      - name: Build submodules
+        run: make -C micropython/ports/esp8266 submodules
+
+      # Map variant to BOARD_VARIANT
+      - name: Determine board variant
+        id: variant
+        run: |
+          VARIANT="${{ matrix.variant }}"
+          case "$VARIANT" in
+            512K) BOARD_VARIANT="FLASH_512K" ;;
+            1M)   BOARD_VARIANT="FLASH_1M" ;;
+            2M)   BOARD_VARIANT="" ;;  # default
+            4M|8M|16M) BOARD_VARIANT="" ;;  # use default, specify size at flash time
+            *)    BOARD_VARIANT="" ;;
+          esac
+          echo "board_variant=$BOARD_VARIANT" >> $GITHUB_OUTPUT
+          echo "label=$VARIANT" >> $GITHUB_OUTPUT
+
+      # Reference build (unmodified, 2M default)
+      - name: Build reference firmware
+        if: needs.prepare.outputs.build_reference == 'true' && matrix.variant == '8M'
+        run: |
+          export PATH="$HOME/xtensa-lx106-elf/bin:$PATH"
+          make -C micropython/ports/esp8266 -j$(nproc) \
+            BOARD=ESP8266_GENERIC \
+            BUILD=build-reference
+          cp micropython/ports/esp8266/build-reference/firmware.bin \
+             micropython-${{ needs.prepare.outputs.version }}-esp8266-reference.bin
+
+      # Custom build
+      - name: Build custom firmware
+        run: |
+          export PATH="$HOME/xtensa-lx106-elf/bin:$PATH"
+          BOARD_VARIANT="${{ steps.variant.outputs.board_variant }}"
+          CFLAGS_EXTRA="${{ needs.prepare.outputs.cflags_extra }}"
+          make -C micropython/ports/esp8266 -j$(nproc) \
+            BOARD=ESP8266_GENERIC \
+            ${BOARD_VARIANT:+BOARD_VARIANT=$BOARD_VARIANT} \
+            ${CFLAGS_EXTRA:+CFLAGS_EXTRA="$CFLAGS_EXTRA"} \
+            BUILD=build-${{ steps.variant.outputs.label }}
+          cp micropython/ports/esp8266/build-${{ steps.variant.outputs.label }}/firmware.bin \
+             micropython-${{ needs.prepare.outputs.version }}-esp8266-${{ steps.variant.outputs.label }}.bin
+
+      # Debug artifacts (unstripped ELF)
+      - name: Collect debug artifacts
+        if: needs.prepare.outputs.include_debug == 'true'
+        run: |
+          cp micropython/ports/esp8266/build-${{ steps.variant.outputs.label }}/firmware.elf \
+             micropython-${{ needs.prepare.outputs.version }}-esp8266-${{ steps.variant.outputs.label }}.elf 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp8266-${{ steps.variant.outputs.label }}
+          path: micropython-*
+          retention-days: 30
+
+  # ===========================================
+  # Create release
+  # ===========================================
+  release:
+    needs: [prepare, build-windows, build-rp2, build-esp8266]
+    if: |
+      always() &&
+      (inputs.upload_release == true || inputs.upload_release == null) &&
+      !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          echo "=== All artifacts ==="
+          find artifacts -type f | sort
+          ls -la artifacts/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: MicroPython ${{ needs.prepare.outputs.version }}
+          body: |
+            Custom MicroPython build based on [${{ needs.prepare.outputs.version }}](https://github.com/micropython/micropython/releases/tag/${{ needs.prepare.outputs.version }})
+
+            ## Build configuration
+
+            - **RP2 flash size:** ${{ inputs.rp2_flash_mb || '4' }} MB
+            - **ESP8266 variants:** ${{ inputs.esp8266_flash || '8M,16M' }}
+            - **Custom CFLAGS:** ${{ inputs.cflags_extra || '(none)' }}
+
+            ## Included builds
+
+            ### Windows
+            - `*-windows-i686.exe` - 32-bit
+            - `*-windows-x86_64.exe` - 64-bit
+            - `*-reference.exe` - unmodified reference build
+
+            ### RP2 (Raspberry Pi Pico)
+            - `*-rp2-RPI_PICO.uf2` - Pico (RP2040)
+            - `*-rp2-RPI_PICO_W.uf2` - Pico W (WiFi)
+            - `*-rp2-RPI_PICO2.uf2` - Pico 2 (RP2350)
+            - `*-reference.uf2` - unmodified reference build
+            - `*.elf` - debug symbols (if enabled)
+
+            ### ESP8266
+            - `*-esp8266-{size}.bin` - firmware for specified flash size
+            - `*-reference.bin` - unmodified reference build
+            - `*.elf` - debug symbols (if enabled)
+          files: artifacts/*
+          fail_on_unmatched_files: false
