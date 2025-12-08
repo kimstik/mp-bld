@@ -322,7 +322,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/xtensa-lx106-elf
-          key: xtensa-lx106-elf-standalone
+          key: xtensa-lx106-elf-standalone-v2
 
       - name: Install Xtensa toolchain
         if: steps.cache-xtensa.outputs.cache-hit != 'true'
@@ -330,6 +330,7 @@ jobs:
           wget -q https://micropython.org/resources/xtensa-lx106-elf-standalone.tar.gz
           tar -xzf xtensa-lx106-elf-standalone.tar.gz -C ~/
           rm xtensa-lx106-elf-standalone.tar.gz
+          rm ~/xtensa-lx106-elf/bin/esptool.py  # Remove Python 2 version, use pip esptool
 
       - name: Install dependencies
         run: sudo pip3 install pyserial esptool==3.3.1
