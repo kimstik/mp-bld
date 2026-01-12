@@ -19,8 +19,7 @@ jobs:
       - name: Get latest MicroPython release
         id: mp
         run: |
-          TAG=$(curl -s https://api.github.com/repos/micropython/micropython/releases/latest | jq -r .tag_name)
-          echo "Latest MicroPython release: $TAG"
+          TAG=$(curl -sf https://api.github.com/repos/micropython/micropython/releases/latest | jq -er .tag_name) || true
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Check if already built
@@ -29,16 +28,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.mp.outputs.tag }}"
+          [ -z "$TAG" ] && { echo "needs_build=false" >> $GITHUB_OUTPUT; exit 0; }
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: token $GH_TOKEN" \
             https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
 
-          if [ "$STATUS" = "200" ]; then
-            echo "Release $TAG already exists, skipping build"
-            echo "needs_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "Release $TAG not found, triggering build"
+          if [ "$STATUS" = "404" ]; then
+            echo "Release $TAG not found, building"
             echo "needs_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Release $TAG exists or check failed ($STATUS), skipping"
+            echo "needs_build=false" >> $GITHUB_OUTPUT
           fi
 
   trigger-build:
