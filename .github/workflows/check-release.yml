@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   check:
@@ -16,6 +17,11 @@ jobs:
       needs_build: ${{ steps.check.outputs.needs_build }}
 
     steps:
+      - name: Keepalive (reset 60-day inactivity timer)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/check-release.yml/enable
+
       - name: Get latest MicroPython release
         id: mp
         run: |

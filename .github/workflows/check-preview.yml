@@ -1,0 +1,76 @@
+name: Check MicroPython Preview
+
+on:
+  schedule:
+    - cron: '30 3 * * *'  # Daily at 03:30 UTC
+  workflow_dispatch:      # Manual trigger
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+      needs_build: ${{ steps.check.outputs.needs_build }}
+
+    steps:
+      - name: Keepalive (reset 60-day inactivity timer)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/check-preview.yml/enable
+
+      - name: Check master for new commits
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Commits-and-tags-only clone, just to compute the describe string
+          git clone --filter=tree:0 --no-checkout \
+            https://github.com/micropython/micropython.git mp-resolve
+          # Match MicroPython's own format: v1.29.0-preview.349.gaf38ee165f
+          VERSION=$(git -C mp-resolve describe --tags HEAD | sed 's/-\([0-9][0-9]*\)-g/.\1.g/')
+          SHA=$(git -C mp-resolve rev-parse HEAD)
+          [ -z "$VERSION" ] && { echo "needs_build=false" >> $GITHUB_OUTPUT; exit 0; }
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+          # Marker artifact: GITHUB_TOKEN cannot write Actions variables (403)
+          BUILT=$(gh api "repos/${GH_REPO}/actions/artifacts?name=preview-built-${VERSION}" \
+            --jq '[.artifacts[] | select(.expired == false)] | length' 2>/dev/null || echo 0)
+          echo "Current master: $VERSION, marker artifacts: $BUILT"
+          if [ "$BUILT" != "0" ]; then
+            echo "Already built, skipping"
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  trigger-build:
+    needs: check
+    if: needs.check.outputs.needs_build == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      mp_version: ${{ needs.check.outputs.version }}
+      mp_ref: ${{ needs.check.outputs.sha }}
+      upload_release: false
+    secrets: inherit
+
+  record:
+    needs: [check, trigger-build]
+    if: needs.trigger-build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create marker file
+        run: echo "${{ needs.check.outputs.sha }}" > marker.txt
+
+      - name: Record built version
+        uses: actions/upload-artifact@v7
+        with:
+          name: preview-built-${{ needs.check.outputs.version }}
+          path: marker.txt
+          retention-days: 30
