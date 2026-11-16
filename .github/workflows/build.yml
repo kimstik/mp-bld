@@ -278,6 +278,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # Shared picotool: built once, reused by reference and custom builds
+      PICOTOOL_FETCH_FROM_GIT_PATH: ${{ github.workspace }}/.picotool
 
     strategy:
       matrix:
@@ -402,7 +404,7 @@ jobs:
           rm ~/xtensa-lx106-elf/bin/esptool.py  # Remove Python 2 version, use pip esptool
 
       - name: Install dependencies
-        run: sudo pip3 install pyserial esptool==3.3.1
+        run: pip3 install pyserial esptool==3.3.1
 
       - name: Install ccache
         run: sudo apt-get update && sudo apt-get install -y ccache
