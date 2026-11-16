@@ -50,6 +50,20 @@ jobs:
             echo "needs_build=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Prune no-op runs older than 14 days
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # No-op run: trigger-build skipped. Builds and failures are kept.
+          for ID in $(gh run list -w check-preview.yml -s success -L 20 \
+              --created "<$(date -d '14 days ago' +%F)" --json databaseId -q '.[].databaseId'); do
+            if [ "$(gh run view "$ID" --json jobs -q '.jobs[] | select(.name == "trigger-build") | .conclusion')" = skipped ]; then
+              gh run delete "$ID"
+            fi
+          done
+
   trigger-build:
     needs: check
     if: needs.check.outputs.needs_build == 'true'
